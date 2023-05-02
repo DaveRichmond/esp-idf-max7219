@@ -89,6 +89,9 @@ esp_err_t Max7219::begin(void){
     esp_err_t err;
 
 
+    // I know this all isn't pretty, but it's just bringing up the spi bus
+    // so it's expected to be just a long bunch of init struct and call
+    // init function
     ESP_LOGI(TAG, "Initialising SPI bus...");
     spi_bus_config_t bus_config = {
         .mosi_io_num = CONFIG_EXAMPLE_SPI_MOSI,
@@ -126,16 +129,19 @@ esp_err_t Max7219::begin(void){
     };
     gpio_config(&cs_config);
 
+    // now the bus is up, configure the registers
     write(REG_SCAN_LIMIT, 7);
     write(REG_DECODE, 0);
     shutdownStop();
     clear();
-    write(REG_BRIGHTNESS, 0x07);
+    write(REG_BRIGHTNESS, 0x07); // FIXME: make brightness configurable
 
     return ESP_OK;
 }
 
 void Max7219::write(uint8_t opcode, uint8_t data){
+    // thankfully we can just set up a transaction to write two bytes onto the spi bus
+    // and there's no way to know if it worked other than if the bus itself completely breaks
     uint8_t buffer[2] = { opcode, data };
 
     ESP_LOGI(TAG, "SPI Trasaction (%x:%x)", opcode, data);
@@ -151,6 +157,7 @@ void Max7219::write(uint8_t opcode, uint8_t data){
 }
 
 void Max7219::clear(void){
+    // easy, just zero out all the segment ram (ram starts at address 0x01)
     for(int i = 0; i < 8; i++){
         write(i+1, 0);
     }
@@ -159,21 +166,24 @@ void Max7219::clear(void){
 uint8_t Max7219::lookup_code(char c, bool dp){
     uint8_t d = 0;
 
-    if(dp) d = 1;
+    // transform lower casae to upper case, let the user know by setting the dot point
     if(c >= 'a' && c <= 'z'){
         c -= 32;
-        d = 1;
+        dp = 1;
     }
+
     ESP_LOGI(TAG, "Lookup char 0x%x", c);
     for(int i = 0; MAX7219_Font[i].ascii; i++){
         if(c == MAX7219_Font[i].ascii){
             ESP_LOGI(TAG, "Found char %c at position %d -> %x", c, i, MAX7219_Font[i].segs);
-            if(d){
+            if(dp){
                 d = 1 << 7; // dot point is the 7th segment
             }
             return MAX7219_Font[i].segs;
         }
     }
+    
+    // well there's no *known* character, just make it empty
     return 0;
 }
 
@@ -182,7 +192,7 @@ void Max7219::displayChar(int pos, char c, bool dp){
     if(pos >= 8) return;
     
     pos = 7-pos; // display is mapped right to left
-    write(pos+1, lookup_code(c, dp));
+    write(pos+1, lookup_code(c, dp)); // remember, ram starts at address 0x01
 }
 
 
@@ -193,6 +203,7 @@ void Max7219::displayText(const char *s, Max7219::justification align){
     int l = strlen(s);
     if(l > 16) l = 16; // clamp string length
 
+    // go through string looking for dot points and trimming the text where appropriate
     int y = 0;
     for(int i = 0; i < l; i++){
         if(s[i] == '.'){
@@ -202,6 +213,7 @@ void Max7219::displayText(const char *s, Max7219::justification align){
         }
     }
 
+    // determine how much we need to offset the text to the right, depending on justification
     int offset = 0;
     if(align == RIGHT || align == CENTRE){
         if(y < 8){
@@ -214,12 +226,13 @@ void Max7219::displayText(const char *s, Max7219::justification align){
         }
     }
 
+    // now (sorta) blit it all out
     for(int i = 0; i < y && (i + offset) < 8; i++){
         displayChar(i+offset, trimText[i], decimals[i]);
     }
 }
 
-// more for testing
+// more for testing, just display one decimal number's character at a position on the display
 void Max7219::displayDec(int pos, int num){
     if(num > 9) num = 0;
     displayChar((uint8_t)pos, ((uint8_t)(num+'0')), false);
