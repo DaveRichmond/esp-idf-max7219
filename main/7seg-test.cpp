@@ -25,30 +25,43 @@
 #include "max7219.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <string>
 
 inline void sleep(int milliseconds){
     vTaskDelay(milliseconds / portTICK_PERIOD_MS);
 }
 
+const auto CLK_PIN = static_cast<gpio_num_t>(4);
+const auto CS_PIN = static_cast<gpio_num_t>(5);
+const auto MOSI_PIN = static_cast<gpio_num_t>(6);
+
 extern "C" {
     void app_main(void){
-        Max7219 max;
+        Max7219 max(1, CLK_PIN, MOSI_PIN, CS_PIN);
         
-        max.begin();
         for(int i = 0; i < 8; i++){
             //max.clear();
             max.displayDec(i, i);
-            sleep(1000);
+            sleep(250);
         }
         sleep(1000);
-        while(1){
+
+        for(int i = 0; i < 5; i++){
             max.clear();
             max.displayText("HELLO", Max7219::RIGHT);
-            sleep(1000);
+            sleep(500);
 
             max.clear();
             max.displayText("HELLO", Max7219::LEFT);
-            sleep(1000);
+            sleep(500);
+        }
+
+        max.clear();
+        int count = 0;
+        while(1){
+            std::string s = std::to_string(count++);
+            max.displayText(s.c_str(), Max7219::RIGHT);
+            sleep(50);
         }
     }
 }

@@ -33,20 +33,9 @@
 #include "sdkconfig.h"
 #include "esp_log.h"
 
-#ifdef CONFIG_IDF_TARGET_ESP32
-#   define ESP_SPI_HOST SPI2_HOST
-#elif CONFIG_IDF_TARGET_ESP32S2
-#   define ESP_SPI_HOST SPI2_HOST
-#elif CONFIG_IDF_TARGET_ESP32S3
-#   define ESP_SPI_HOST SPI2_HOST
-#elif CONFIG_IDF_TARGET_ESP32C3
-#   define ESP_SPI_HOST SPI2_HOST
-#else
-#   error Unknown esp32 chip type!
-#endif
+#include <functional>
 
 static const char TAG[] = "MAX7219";
-static const gpio_num_t cs_gpio = (gpio_num_t)CONFIG_EXAMPLE_SPI_CS;
 
 static const uint8_t REG_DECODE = 0x09;
 static const uint8_t REG_BRIGHTNESS = 0x0a;
@@ -69,50 +58,86 @@ static const struct {
   {'5',0b1011011},{'6',0b1011111},{'7',0b1110000},{'8',0b1111111},{'9',0b1111011},{'\0',0b0000000},
   };
 
-Max7219::Max7219(void){
-
+Max7219::Max7219(int spi_device, gpio_num_t sck, gpio_num_t mosi, gpio_num_t cs)
+    : spi_dev(spi_device), sck(sck), mosi(mosi), cs(cs) {
+    this->begin();
 }
 
-static void cs_high(spi_transaction_t *t){
-    ESP_EARLY_LOGV(TAG, "cs high %d", CONFIG_EXAMPLE_SPI_CS);
-    gpio_set_level(cs_gpio, 1);
+void Max7219::cs_high(){
+    //ESP_EARLY_LOGV(TAG, "cs high %d", this->cs);
+    gpio_set_level(this->cs, 1);
 }
-static void cs_low(spi_transaction_t *t){
-    ESP_EARLY_LOGV(TAG, "cs low %d", CONFIG_EXAMPLE_SPI_CS);
-    gpio_set_level(cs_gpio, 0);
+void Max7219::cs_low(){
+    //ESP_EARLY_LOGV(TAG, "cs low %d", this->cs);
+    gpio_set_level(this->cs, 0);
 }
 
 void Max7219::shutdownStop(void){
     write(REG_SHUTDOWN, 1);
 }
+
+// borrowed from https://stackoverflow.com/questions/28746744/passing-capturing-lambda-as-function-pointer
+template<typename Function>
+struct function_traits;
+
+template <typename Ret, typename... Args>
+struct function_traits<Ret(Args...)> {
+    typedef Ret(*ptr)(Args...);
+};
+
+template <typename Ret, typename... Args>
+struct function_traits<Ret(*const)(Args...)> : function_traits<Ret(Args...)> {};
+
+template <typename Cls, typename Ret, typename... Args>
+struct function_traits<Ret(Cls::*)(Args...) const> : function_traits<Ret(Args...)> {};
+
+using voidfun = void(*)();
+
+template <typename F>
+voidfun lambda_to_void_function(F lambda) {
+    static auto lambda_copy = lambda;
+
+    return []() {
+        lambda_copy();
+    };
+}
+template <typename F>
+auto lambda_to_pointer(F lambda) -> typename function_traits<decltype(&F::operator())>::ptr {
+    static auto lambda_copy = lambda;
+    
+    return []<typename... Args>(Args... args) {
+        return lambda_copy(args...);
+    };
+}
+// end borrow 
+
 esp_err_t Max7219::begin(void){
     esp_err_t err;
-
 
     // I know this all isn't pretty, but it's just bringing up the spi bus
     // so it's expected to be just a long bunch of init struct and call
     // init function
     ESP_LOGI(TAG, "Initialising SPI bus...");
-    spi_bus_config_t bus_config = {
-        .mosi_io_num = CONFIG_EXAMPLE_SPI_MOSI,
-        .miso_io_num = -1,
-        .sclk_io_num = CONFIG_EXAMPLE_SPI_SCK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 32,
-    };
-    err = spi_bus_initialize(ESP_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO);
+    spi_bus_config_t bus_config = {};
+    bus_config.mosi_io_num = this->mosi;
+    bus_config.miso_io_num = -1;
+    bus_config.sclk_io_num = this->sck;
+    bus_config.max_transfer_sz = 32;
+    err = spi_bus_initialize(get_spi(this->spi_dev), &bus_config, SPI_DMA_CH_AUTO);
 
-    spi_device_interface_config_t dev_config = {
-        .mode = 0,
-        .clock_speed_hz = 10'000'000,
-        .spics_io_num = -1,
-        .flags = 0,
-        .queue_size = 1,
-        .pre_cb = cs_low,
-        .post_cb = cs_high,
-    };
-    err = spi_bus_add_device(ESP_SPI_HOST, &dev_config, &this->spi_handle);
+    spi_device_interface_config_t dev_config = {};
+    dev_config.mode = 0;
+    dev_config.clock_speed_hz = 10'000'000;
+    dev_config.spics_io_num = -1;
+    dev_config.flags = 0;
+    dev_config.queue_size = 1;
+    //std::function<void(spi_transaction_t *)> pre_cb = [&](spi_transaction_t *t) -> void { cs_low(); };
+    //std::function<void(spi_transaction_t *)> post_cb = [&](spi_transaction_t *t) -> void { cs_high(); };
+    
+    dev_config.pre_cb = lambda_to_pointer([&](spi_transaction_t *t){ this->cs_low(); });
+    dev_config.post_cb = lambda_to_pointer([&](spi_transaction_t *t){ this->cs_high(); });
+
+    err = spi_bus_add_device(get_spi(this->spi_dev), &dev_config, &this->spi_handle);
 
     if(err != ESP_OK){
         if(this->spi_handle){
@@ -121,12 +146,11 @@ esp_err_t Max7219::begin(void){
         return err;
     }
 
-    ESP_LOGI(TAG, "Initialising SPI CS GPIO %d...", CONFIG_EXAMPLE_SPI_CS);
-    gpio_set_level(cs_gpio, 1);
-    gpio_config_t cs_config = {
-        .pin_bit_mask = BIT64(CONFIG_EXAMPLE_SPI_CS),
-        .mode = GPIO_MODE_OUTPUT,
-    };
+    ESP_LOGI(TAG, "Initialising SPI CS GPIO %d...", this->cs);
+    gpio_set_level(this->cs, 1);
+    gpio_config_t cs_config = { };
+    cs_config.pin_bit_mask = BIT64(this->cs);
+    cs_config.mode = GPIO_MODE_OUTPUT;
     gpio_config(&cs_config);
 
     // now the bus is up, configure the registers
@@ -144,11 +168,10 @@ void Max7219::write(uint8_t opcode, uint8_t data){
     // and there's no way to know if it worked other than if the bus itself completely breaks
     uint8_t buffer[2] = { opcode, data };
 
-    ESP_LOGI(TAG, "SPI Trasaction (%x:%x)", opcode, data);
-    spi_transaction_t transaction = {
-        .length = 16,
-        .tx_buffer = &buffer,
-    };
+    ESP_LOGD(TAG, "SPI Trasaction (%x:%x)", opcode, data);
+    spi_transaction_t transaction = {};
+    transaction.length = 16;
+    transaction.tx_buffer = &buffer;
     esp_err_t err = spi_device_polling_transmit(this->spi_handle, &transaction);
 
     if(err != ESP_OK){
@@ -172,10 +195,10 @@ uint8_t Max7219::lookup_code(char c, bool dp){
         dp = 1;
     }
 
-    ESP_LOGI(TAG, "Lookup char 0x%x", c);
+    ESP_LOGD(TAG, "Lookup char 0x%x", c);
     for(int i = 0; MAX7219_Font[i].ascii; i++){
         if(c == MAX7219_Font[i].ascii){
-            ESP_LOGI(TAG, "Found char %c at position %d -> %x", c, i, MAX7219_Font[i].segs);
+            ESP_LOGD(TAG, "Found char %c at position %d -> %x", c, i, MAX7219_Font[i].segs);
             if(dp){
                 d = 1 << 7; // dot point is the 7th segment
             }

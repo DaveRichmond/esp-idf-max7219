@@ -25,14 +25,32 @@
 
 #include <stdint.h>
 
+#include "driver/gpio.h"
 #include "driver/spi_master.h"
 
 class Max7219 {
     private:
+        constexpr spi_host_device_t get_spi(int n){
+           switch(n){
+                case 0: return SPI1_HOST;
+                case 1: return SPI2_HOST;
+                #ifdef SPI3_HOST
+                case 2: return SPI3_HOST;
+                #endif
+                default: return SPI_HOST_MAX;
+            }
+        }
         spi_device_handle_t spi_handle;
         void write(uint8_t opcode, uint8_t data);
         uint8_t lookup_code(char c, bool dp);
         void shutdownStop(void);
+
+        void cs_high(void);
+        void cs_low(void);
+
+
+        int spi_dev;
+        gpio_num_t sck, mosi, cs;
 
     public:
         enum justification {
@@ -41,7 +59,7 @@ class Max7219 {
             CENTRE
         } ;
         
-        Max7219(void);
+        Max7219(int spi_device, gpio_num_t sck, gpio_num_t mosi, gpio_num_t cs);
         esp_err_t begin(void);
         void clear(void);
         void displayChar(int pos, char c, bool dp);
